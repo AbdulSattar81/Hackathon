@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Interpreter — Real-Time ER Medical Translator</title>
+<style>
+  :root{
+    --bg:#0b1220; --panel:#111c2e; --panel2:#16243a; --line:#243650;
+    --ink:#eaf2ff; --muted:#9fb3cd; --teal:#2dd4bf; --teal-d:#0f766e;
+    --blue:#3b82f6; --calm:#34d399; --reassure:#60a5fa; --urgent:#f59e0b;
+    --critical:#ef4444; --shadow:0 10px 30px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:radial-gradient(1200px 600px at 80% -10%,#13243f 0%,var(--bg) 55%);
+    color:var(--ink); line-height:1.45; min-height:100vh;
+  }
+  header{
+    padding:18px 24px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    background:rgba(9,15,26,.6); backdrop-filter:blur(8px); position:sticky; top:0; z-index:10;
+  }
+  .logo{display:flex;align-items:center;gap:11px}
+  .logo .pulse{width:14px;height:14px;border-radius:50%;background:var(--teal);
+    box-shadow:0 0 0 0 rgba(45,212,191,.6); animation:pulse 2s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(45,212,191,.55)}70%{box-shadow:0 0 0 12px rgba(45,212,191,0)}100%{box-shadow:0 0 0 0 rgba(45,212,191,0)}}
+  h1{font-size:18px;margin:0;letter-spacing:.2px}
+  h1 span{color:var(--teal)}
+  .sub{color:var(--muted);font-size:12.5px;margin-top:2px}
+  .badge{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .chip{font-size:11.5px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--panel)}
+  .chip b{color:var(--teal)}
+  main{max-width:1180px;margin:0 auto;padding:22px;display:grid;grid-template-columns:1.55fr 1fr;gap:18px}
+  @media(max-width:900px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted);margin:0;padding:14px 18px;border-bottom:1px solid var(--line)}
+  .pad{padding:18px}
+  /* Controls */
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  label.lab{font-size:12px;color:var(--muted)}
+  select{
+    background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:10px;
+    padding:10px 12px;font-size:14px;min-width:190px
+  }
+  .dir{font-size:14px;font-weight:600;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 13px}
+  .dir b{color:var(--teal)}
+  .swapbtn{display:inline-flex;align-items:center;gap:7px;font-size:13.5px;font-weight:700;color:#04201c;background:var(--teal);border:none;border-radius:10px;padding:10px 14px;cursor:pointer;transition:.15s}
+  .swapbtn:hover{filter:brightness(1.08)}
+  .swapbtn .ar{font-size:16px}
+  .mic{
+    --c:var(--teal);
+    display:flex;align-items:center;justify-content:center;gap:11px;width:100%;
+    margin-top:16px;padding:18px;border-radius:14px;border:1px solid var(--line);
+    background:linear-gradient(180deg,#15314a,#10243a);color:var(--ink);font-size:16px;font-weight:600;
+    cursor:pointer;transition:.15s;user-select:none
+  }
+  .mic:hover{border-color:var(--teal)}
+  .mic.live{background:linear-gradient(180deg,#3a1620,#2a0f17);border-color:var(--critical)}
+  .mic .dot{width:13px;height:13px;border-radius:50%;background:var(--teal)}
+  .mic.live .dot{background:var(--critical);animation:pulse 1.1s infinite}
+  .hint{color:var(--muted);font-size:12px;margin-top:9px}
+  /* Transcript blocks */
+  .pane{margin-top:16px;border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--panel2);min-height:78px}
+  .pane .tag{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);display:flex;align-items:center;gap:8px}
+  .flag{font-size:15px}
+  .en{font-size:18px;margin-top:8px;color:#dbe7fb}
+  .tr{font-size:23px;margin-top:8px;color:#fff;font-weight:600;direction:auto}
+  .interim{opacity:.55;font-style:italic}
+  .src{font-size:11px;color:var(--muted);margin-top:8px}
+  /* Emotion meter */
+  .emo{margin-top:16px}
+  .emo .bar{height:12px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);overflow:hidden}
+  .emo .fill{height:100%;width:8%;transition:.4s;background:var(--calm)}
+  .emo .lbls{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:6px}
+  .emoState{display:flex;align-items:center;gap:10px;margin-top:4px}
+  .emoState .pill{font-size:12.5px;font-weight:700;padding:4px 11px;border-radius:999px;background:var(--panel2);border:1px solid var(--line)}
+  .prosody{font-size:11.5px;color:var(--muted)}
+  /* quick phrases */
+  .quick{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .quick button{font-size:12.5px;background:var(--panel2);color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:7px 12px;cursor:pointer}
+  .quick button:hover{color:var(--ink);border-color:var(--teal)}
+  .typebox{display:flex;gap:8px;margin-top:14px}
+  .typebox input{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:10px 12px;font-size:14px}
+  .typebox button{background:var(--teal);color:#04201c;border:none;border-radius:10px;padding:0 16px;font-weight:700;cursor:pointer}
+  /* side panels */
+  .pt{display:flex;align-items:center;gap:12px}
+  .avatar{width:42px;height:42px;border-radius:50%;background:linear-gradient(135deg,#2dd4bf,#3b82f6);display:flex;align-items:center;justify-content:center;font-weight:700;color:#04201c}
+  .meta{font-size:12px;color:var(--muted)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin-top:14px;font-size:13px}
+  .kv .k{color:var(--muted)}
+  .alle{color:#fca5a5;font-weight:600}
+  .visit{border-top:1px solid var(--line);padding:11px 0;font-size:13px}
+  .visit:first-of-type{border-top:none}
+  .visit .d{color:var(--teal);font-size:11.5px;letter-spacing:.4px}
+  .gloss{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  .gloss span{font-size:11px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:3px 8px;color:var(--muted)}
+  /* analytics */
+  .stat{font-size:30px;font-weight:800;color:#fff}
+  .stat small{font-size:13px;color:var(--muted);font-weight:500;display:block;margin-top:2px}
+  .bars{margin-top:14px;display:flex;flex-direction:column;gap:10px}
+  .brow{display:grid;grid-template-columns:84px 1fr 44px;align-items:center;gap:10px;font-size:12.5px}
+  .track{height:14px;background:var(--panel2);border:1px solid var(--line);border-radius:999px;overflow:hidden}
+  .trackfill{height:100%;border-radius:999px;background:linear-gradient(90deg,#3b82f6,#ef4444)}
+  .src-note{font-size:11px;color:var(--muted);margin-top:14px;border-top:1px dashed var(--line);padding-top:10px}
+  /* sponsor footer */
+  .sponsors{max-width:1180px;margin:0 auto;padding:6px 22px 36px;display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  @media(max-width:900px){.sponsors{grid-template-columns:1fr 1fr}}
+  .spon{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+  .spon h3{margin:0 0 4px;font-size:13px;color:var(--teal)}
+  .spon p{margin:0;font-size:12px;color:var(--muted)}
+  .warn{background:#2a1a0a;border:1px solid #6b4a16;color:#fcd9a0;font-size:12px;border-radius:10px;padding:10px 12px;margin:14px 22px 0;max-width:1180px}
+  .warn b{color:#ffd9a0}
+  footer{max-width:1180px;margin:0 auto;padding:0 22px 40px;color:var(--muted);font-size:11.5px}
+  a{color:var(--teal)}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">
+    <div class="pulse"></div>
+    <div>
+      <h1><span>Interpreter</span> — Real-Time ER Medical Translator</h1>
+      <div class="sub">Doctor speaks English · patient hears their language in a calm voice that keeps the urgency</div>
+    </div>
+  </div>
+  <div class="badge">
+    <span class="chip"><b>145</b> languages spoken in Houston</span>
+    <span class="chip">TMC / HackHCC demo</span>
+  </div>
+</header>
+
+<div id="compat" class="warn" style="display:none"></div>
+
+<main>
+  <!-- LEFT: live translator -->
+  <section class="card">
+    <h2>Live consult</h2>
+    <div class="pad">
+      <div class="row">
+        <span class="dir" id="dirLabel">🇺🇸 <b>English</b> → 🇲🇽 <b>Spanish</b></span>
+        <button id="swap" class="swapbtn" title="Switch who's speaking"><span class="ar">⇄</span> Switch direction</button>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <label class="lab" for="lang">Patient's language</label>
+        <select id="lang"></select>
+        <label class="lab" for="rate" style="margin-left:8px">Calm pacing</label>
+        <input id="rate" type="range" min="0.7" max="1.1" step="0.05" value="0.95" />
+      </div>
+
+      <button id="mic" class="mic" aria-pressed="false">
+        <span class="dot"></span><span id="micLabel">Hold consult open — tap to speak (English)</span>
+      </button>
+      <div class="hint" id="hint">Tap, speak a sentence in English, and the patient hears it spoken back in their language. Mic + voice run in your browser; translation uses a live API with an offline ER phrasebook fallback.</div>
+
+      <div class="quick" id="quick"></div>
+      <div class="typebox">
+        <input id="typed" placeholder="…or type what the doctor says and press Send" />
+        <button id="send">Send</button>
+      </div>
+
+      <!-- emotion -->
+      <div class="emo">
+        <div class="emoState">
+          <span class="pill" id="emoPill" style="border-color:var(--calm);color:var(--calm)">Calm</span>
+          <span class="prosody" id="prosody">voice: steady · gentle · clear</span>
+        </div>
+        <div class="bar" style="margin-top:8px"><div class="fill" id="emoFill"></div></div>
+        <div class="lbls"><span>Calm</span><span>Reassuring</span><span>Urgent</span><span>Critical</span></div>
+      </div>
+
+      <div class="pane">
+        <div class="tag" id="srcTag">Doctor speaks · English</div>
+        <div class="en" id="enOut"><span class="interim">Waiting for speech…</span></div>
+      </div>
+      <div class="pane">
+        <div class="tag"><span class="flag" id="trFlag">🌐</span> <span id="trName">—</span></div>
+        <div class="tr" id="trOut">—</div>
+        <div class="src" id="trSrc"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- RIGHT: patient context + analytics -->
+  <aside style="display:flex;flex-direction:column;gap:18px">
+    <section class="card">
+      <h2>Patient record · MongoDB Atlas</h2>
+      <div class="pad">
+        <div class="pt">
+          <div class="avatar">MG</div>
+          <div>
+            <div style="font-weight:700">Maria G. · 58F</div>
+            <div class="meta">MRN 4471-22 · ER triage level 2</div>
+          </div>
+        </div>
+        <div class="kv">
+          <span class="k">Preferred lang</span><span id="prefLang">Spanish (Español)</span>
+          <span class="k">Allergies</span><span class="alle">Penicillin, contrast dye</span>
+          <span class="k">Current meds</span><span>Metformin, Lisinopril</span>
+        </div>
+        <div style="margin-top:14px">
+          <div class="visit"><div class="d">2026-02-09 · ER</div>Chest tightness, discharged. <b>No interpreter on shift → left against advice.</b></div>
+          <div class="visit"><div class="d">2025-11-30 · Cardiology</div>Started Lisinopril. Med-adherence counseling (Spanish).</div>
+          <div class="visit"><div class="d">2025-08-14 · ER</div>Hyperglycemia. Metformin dose adjusted.</div>
+        </div>
+        <div class="meta" style="margin-top:12px">Medication terms auto-glossed for the interpreter:</div>
+        <div class="gloss">
+          <span>Lisinopril → presión arterial</span>
+          <span>Metformin → azúcar / diabetes</span>
+          <span>contrast dye → tinte de contraste</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Language-gap analytics · Snowflake</h2>
+      <div class="pad">
+        <div class="stat">+38%<small>30-day readmission lift when no interpreter reaches the patient in time (anonymized, last 90 days)</small></div>
+        <div class="bars" id="bars"></div>
+        <div class="src-note">Aggregated &amp; de-identified consult metadata streamed to Snowflake → flags which language gaps drive the most bounce-backs, so staffing follows the data.</div>
+      </div>
+    </section>
+  </aside>
+</main>
+
+<div class="sponsors">
+  <div class="spon"><h3>ElevenLabs</h3><p>Voice that carries tone, not just words — the patient hears urgency or reassurance, not a flat robot. (Demo uses browser TTS; prod swaps in ElevenLabs emotive voices.)</p></div>
+  <div class="spon"><h3>MongoDB Atlas</h3><p>Per-patient visit history, preferred language, allergies, and a medication-term glossary the interpreter pulls mid-consult.</p></div>
+  <div class="spon"><h3>Snowflake</h3><p>Anonymized analytics on which language gaps drive readmissions — turns each consult into staffing signal.</p></div>
+  <div class="spon"><h3>DigitalOcean</h3><p>Hosts the realtime relay + API. Low-latency so translation lands before the moment passes.</p></div>
+</div>
+
+<footer>
+  Built for HackHCC CodeRunners. Speech recognition and synthesis run locally via the Web Speech API; no audio leaves the device in this demo. Best in Chrome/Edge. This is a prototype, not a medical device.
+</footer>
+
+<script>
+/* ---------- language config ---------- */
+const LANGS = {
+  es:{name:"Spanish",native:"Español",tts:"es-MX",pair:"es",flag:"🇲🇽"},
+  vi:{name:"Vietnamese",native:"Tiếng Việt",tts:"vi-VN",pair:"vi",flag:"🇻🇳"},
+  zh:{name:"Mandarin",native:"中文",tts:"zh-CN",pair:"zh-CN",flag:"🇨🇳"},
+  ar:{name:"Arabic",native:"العربية",tts:"ar-SA",pair:"ar",flag:"🇸🇦"},
+  fr:{name:"French",native:"Français",tts:"fr-FR",pair:"fr",flag:"🇫🇷"},
+  ur:{name:"Urdu",native:"اردو",tts:"ur-PK",pair:"ur",flag:"🇵🇰"},
+  hi:{name:"Hindi",native:"हिन्दी",tts:"hi-IN",pair:"hi",flag:"🇮🇳"},
+  ko:{name:"Korean",native:"한국어",tts:"ko-KR",pair:"ko",flag:"🇰🇷"},
+  tl:{name:"Tagalog",native:"Tagalog",tts:"fil-PH",pair:"tl",flag:"🇵🇭"},
+  tr:{name:"Turkish",native:"Türkçe",tts:"tr-TR",pair:"tr",flag:"🇹🇷"},
+  ru:{name:"Russian",native:"Русский",tts:"ru-RU",pair:"ru",flag:"🇷🇺"},
+  ky:{name:"Kyrgyz",native:"Кыргызча",tts:"ky-KG",pair:"ky",flag:"🇰🇬"}
+};
+
+/* ---------- offline ER phrasebook (top Houston langs) ---------- */
+const norm = s => s.toLowerCase().replace(/[^a-z0-9 ]/g,"").replace(/\s+/g," ").trim();
+const PHRASES = {
+  "where does it hurt":      {es:"¿Dónde le duele?", vi:"Bạn đau ở đâu?", zh:"您哪里疼？", ru:"Где у вас болит?", tr:"Neresi acıyor?"},
+  "are you in pain":         {es:"¿Tiene dolor?", vi:"Bạn có đau không?", zh:"您感到疼痛吗？", ru:"Вам больно?", tr:"Ağrınız var mı?"},
+  "i need you to stay calm": {es:"Necesito que se mantenga tranquilo.", vi:"Tôi cần bạn giữ bình tĩnh.", zh:"我需要您保持冷静。", ru:"Мне нужно, чтобы вы сохраняли спокойствие.", tr:"Sakin kalmanızı istiyorum."},
+  "we are here to help you": {es:"Estamos aquí para ayudarle.", vi:"Chúng tôi ở đây để giúp bạn.", zh:"我们在这里帮助您。", ru:"Мы здесь, чтобы помочь вам.", tr:"Size yardım etmek için buradayız."},
+  "can you breathe okay":    {es:"¿Puede respirar bien?", vi:"Bạn thở có bình thường không?", zh:"您呼吸还正常吗？", ru:"Вы нормально дышите?", tr:"Rahat nefes alabiliyor musunuz?"},
+  "are you allergic to any medication":{es:"¿Es alérgico a algún medicamento?", vi:"Bạn có dị ứng với thuốc nào không?", zh:"您对任何药物过敏吗？", ru:"У вас есть аллергия на какие-нибудь лекарства?", tr:"Herhangi bir ilaca alerjiniz var mı?"},
+  "we need to do this now":  {es:"Necesitamos hacer esto ahora.", vi:"Chúng tôi cần làm điều này ngay bây giờ.", zh:"我们需要现在就做。", ru:"Нам нужно сделать это сейчас.", tr:"Bunu şimdi yapmamız gerekiyor."},
+  "you are going to be okay":{es:"Va a estar bien.", vi:"Bạn sẽ ổn thôi.", zh:"您会没事的。", ru:"Всё будет хорошо.", tr:"İyi olacaksınız."},
+  "do you have chest pain":  {es:"¿Tiene dolor en el pecho?", vi:"Bạn có đau ngực không?", zh:"您有胸痛吗？", ru:"У вас боль в груди?", tr:"Göğüs ağrınız var mı?"},
+  "when did this start":     {es:"¿Cuándo comenzó esto?", vi:"Việc này bắt đầu khi nào?", zh:"这是什么时候开始的？", ru:"Когда это началось?", tr:"Bu ne zaman başladı?"},
+  "take a deep breath":      {es:"Respire profundo.", vi:"Hãy hít thở sâu.", zh:"请深呼吸。", ru:"Сделайте глубокий вдох.", tr:"Derin bir nefes alın."},
+  "i am going to give you medicine for the pain":{es:"Le voy a dar medicina para el dolor.", vi:"Tôi sẽ cho bạn thuốc giảm đau.", zh:"我会给您止痛药。", ru:"Я дам вам лекарство от боли.", tr:"Size ağrı için ilaç vereceğim."}
+};
+const QUICK = ["Where does it hurt?","Are you allergic to any medication?","Take a deep breath.","We need to do this now.","You are going to be okay."];
+
+/* ---------- analytics (Snowflake mock) ---------- */
+const GAP = [["Spanish",62],["Vietnamese",48],["Mandarin",41],["Arabic",37],["Urdu",29]];
+
+/* ---------- DOM ---------- */
+const $ = id => document.getElementById(id);
+const langSel=$("lang"), enOut=$("enOut"), trOut=$("trOut"), trSrc=$("trSrc"),
+      trFlag=$("trFlag"), trName=$("trName"), emoFill=$("emoFill"), emoPill=$("emoPill"),
+      prosody=$("prosody"), micBtn=$("mic"), micLabel=$("micLabel"), rate=$("rate");
+
+Object.keys(LANGS).forEach(k=>{
+  const o=document.createElement("option");
+  o.value=k; o.textContent=`${LANGS[k].flag}  ${LANGS[k].name} · ${LANGS[k].native}`;
+  langSel.appendChild(o);
+});
+langSel.value="es";
+const EN={name:"English",native:"English",tts:"en-US",pair:"en",flag:"🇺🇸"};
+let reversed=false, rec=null, listening=false;
+function curLang(){return LANGS[langSel.value];}
+function sides(){const p=curLang();return reversed?{src:p,tgt:EN}:{src:EN,tgt:p};}
+function updateDirectionUI(){
+  const {src,tgt}=sides();
+  $("dirLabel").innerHTML=`${src.flag} <b>${src.name}</b> &rarr; ${tgt.flag} <b>${tgt.name}</b>`;
+  $("srcTag").textContent=`${reversed?"Patient speaks":"Doctor speaks"} · ${src.name}`;
+  trFlag.textContent=tgt.flag;
+  trName.textContent=`${reversed?"Doctor hears":"Patient hears"} · ${tgt.name}`;
+  if(!listening)micLabel.textContent=`Tap to speak (${src.name})`;
+  $("typed").placeholder=`…or type ${src.name} and press Send`;
+  if(rec)rec.lang=src.tts;
+}
+updateDirectionUI();
+langSel.addEventListener("change",updateDirectionUI);
+$("swap").onclick=()=>{
+  reversed=!reversed;
+  updateDirectionUI();
+  if(listening&&rec){try{rec.stop();}catch(e){}}  // onend restarts with the new source language
+};
+
+$("quick").innerHTML="";
+QUICK.forEach(p=>{const b=document.createElement("button");b.textContent=p;b.onclick=()=>handle(p);$("quick").appendChild(b);});
+
+const bars=$("bars"); const max=Math.max(...GAP.map(g=>g[1]));
+GAP.forEach(([lang,val])=>{
+  const row=document.createElement("div");row.className="brow";
+  row.innerHTML=`<span>${lang}</span><div class="track"><div class="trackfill" style="width:${Math.round(val/max*100)}%"></div></div><span>${val}</span>`;
+  bars.appendChild(row);
+});
+
+/* ---------- emotion / urgency detection ---------- */
+const URGENT=["now","immediately","stat","emergency","right away","quickly","hurry","can't breathe","cant breathe","stop","don't","dont","chest pain","bleeding","allergic","help"];
+const REASSURE=["okay","you're safe","youre safe","calm","relax","fine","help you","here for you","deep breath","going to be okay","dont worry","don't worry"];
+function analyze(text){
+  const t=norm(text); let score=10;
+  URGENT.forEach(w=>{if(t.includes(norm(w)))score+=22;});
+  REASSURE.forEach(w=>{if(t.includes(norm(w)))score-=10;});
+  if(/!/.test(text))score+=12;
+  if(text===text.toUpperCase()&&text.length>3)score+=15;
+  score=Math.max(4,Math.min(100,score));
+  let label,color,pr,r=parseFloat(rate.value),pitch=1.0;
+  if(score<28){label="Calm";color="var(--calm)";pr="voice: steady · gentle · clear";pitch=0.98;}
+  else if(score<52){label="Reassuring";color="var(--reassure)";pr="voice: warm · slower · softening";r-=0.05;pitch=0.94;}
+  else if(score<76){label="Urgent";color="var(--urgent)";pr="voice: firmer · crisp · still controlled";pitch=1.06;}
+  else{label="Critical";color="var(--critical)";pr="voice: direct · emphatic · no panic";pitch=1.12;}
+  return {score,label,color,prosody:pr,rate:Math.max(0.7,Math.min(1.15,r)),pitch};
+}
+function paintEmotion(e){
+  emoFill.style.width=e.score+"%"; emoFill.style.background=e.color;
+  emoPill.textContent=e.label; emoPill.style.color=e.color; emoPill.style.borderColor=e.color;
+  prosody.textContent=e.prosody;
+}
+
+/* ---------- translation: live API + offline fallback ---------- */
+async function translate(text){
+  const {src,tgt}=sides();
+  const key=norm(text);
+  // offline phrasebook only applies English -> patient language
+  if(!reversed && PHRASES[key] && PHRASES[key][langSel.value]){
+    return {text:PHRASES[key][langSel.value], src:"offline ER phrasebook"};
+  }
+  try{
+    const url=`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${src.pair}|${tgt.pair}`;
+    const ctl=new AbortController(); const to=setTimeout(()=>ctl.abort(),4500);
+    const r=await fetch(url,{signal:ctl.signal}); clearTimeout(to);
+    const j=await r.json();
+    if(j && j.responseData && j.responseData.translatedText){
+      return {text:j.responseData.translatedText, src:"live translation API"};
+    }
+  }catch(e){/* fall through */}
+  // last-resort partial phrasebook match (English -> patient only)
+  if(!reversed){ for(const k in PHRASES){ if(key.includes(k)&&PHRASES[k][langSel.value]) return {text:PHRASES[k][langSel.value],src:"offline ER phrasebook (partial)"}; } }
+  return {text:"["+tgt.name+" translation unavailable offline — reconnect for full coverage]", src:"no network"};
+}
+
+/* ---------- TTS ---------- */
+let voices=[];
+function loadVoices(){voices=window.speechSynthesis?window.speechSynthesis.getVoices():[];}
+if("speechSynthesis" in window){loadVoices();window.speechSynthesis.onvoiceschanged=loadVoices;}
+function pickVoice(locale){
+  if(!voices.length)loadVoices();
+  const base=locale.split("-")[0];
+  return voices.find(v=>v.lang&&v.lang.toLowerCase()===locale.toLowerCase())
+      || voices.find(v=>v.lang&&v.lang.toLowerCase().startsWith(base))
+      || null;
+}
+function speak(text,emotion){
+  if(!("speechSynthesis" in window))return;
+  window.speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text);
+  const loc=sides().tgt.tts; const v=pickVoice(loc);
+  if(v)u.voice=v; u.lang=loc;
+  u.rate=emotion.rate; u.pitch=emotion.pitch; u.volume=1;
+  window.speechSynthesis.speak(u);
+}
+
+/* ---------- main handler ---------- */
+async function handle(text){
+  if(!text||!text.trim())return;
+  enOut.innerHTML=text;
+  const e=analyze(text); paintEmotion(e);
+  trOut.textContent="…"; trSrc.textContent="translating…";
+  const out=await translate(text);
+  trOut.textContent=out.text; trSrc.textContent=out.src+(out.src.includes("phrasebook")?" · always-on":"");
+  speak(out.text,e);
+}
+$("send").onclick=()=>{handle($("typed").value);$("typed").value="";};
+$("typed").addEventListener("keydown",ev=>{if(ev.key==="Enter"){handle($("typed").value);$("typed").value="";}});
+
+/* ---------- speech recognition ---------- */
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+if(SR){
+  rec=new SR(); rec.lang=sides().src.tts; rec.continuous=true; rec.interimResults=true;
+  rec.onresult=ev=>{
+    let interim="",fin="";
+    for(let i=ev.resultIndex;i<ev.results.length;i++){
+      const t=ev.results[i][0].transcript;
+      if(ev.results[i].isFinal)fin+=t; else interim+=t;
+    }
+    if(interim)enOut.innerHTML=`<span class="interim">${interim}</span>`;
+    if(fin)handle(fin.trim());
+  };
+  rec.onend=()=>{if(listening)try{rec.start();}catch(e){}};
+  rec.onerror=ev=>{$("hint").textContent="Mic error: "+ev.error+". Type below to keep going.";};
+}else{
+  micBtn.style.opacity=.6;
+}
+function setMic(on){
+  listening=on; micBtn.classList.toggle("live",on); micBtn.setAttribute("aria-pressed",on);
+  micLabel.textContent=on?"Listening… tap to stop":`Tap to speak (${sides().src.name})`;
+  if(on){try{rec.lang=sides().src.tts;rec.start();}catch(e){}}else{try{rec.stop();}catch(e){}}
+}
+micBtn.onclick=()=>{
+  if(!SR){alert("Speech recognition needs Chrome or Edge. You can still type sentences below.");return;}
+  setMic(!listening);
+};
+
+/* ---------- compatibility banner ---------- */
+(function(){
+  const msgs=[];
+  if(!SR)msgs.push("speech-to-text (use Chrome/Edge, or type below)");
+  if(!("speechSynthesis" in window))msgs.push("voice playback");
+  if(msgs.length){const c=$("compat");c.style.display="block";
+    c.innerHTML="<b>Heads up:</b> this browser doesn't support "+msgs.join(" & ")+". Everything else still works.";}
+})();
+</script>
+</body>
+</html>
