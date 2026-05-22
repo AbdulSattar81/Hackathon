@@ -1,0 +1,1627 @@
+import { useState, useEffect, useRef } from 'react';
+import {
+  Mic, MicOff, Send, Clock, AlertTriangle, Activity, Heart,
+  ChevronRight, User, Globe, ArrowRight, X, Check, Stethoscope,
+  Radio, Volume2, MessageSquare, Sparkles, ShieldCheck
+} from 'lucide-react';
+
+/* ----------------------------------------------------------
+   ER TRIAGE ROOM — HackHCC CodeRunners demo
+   Two coupled UIs in one app:
+     • Patient view   — calm, editorial, voice-forward intake
+     • Doctor view    — dense, terminal-flavored ops console
+   Both share state, so anything the doctor does is reflected
+   instantly on the patient side, and vice versa.
+
+   Stack (real version, not in this demo):
+     ElevenLabs    — voice intake + readback in patient language
+     MongoDB       — patient records, symptom vector search
+     Snowflake     — wait-time prediction (Cortex), analytics
+     DigitalOcean  — host the API + workers
+   ---------------------------------------------------------- */
+
+// ───────────────────────────────────────────────────────────
+//  MOCK DATA + URGENCY HEURISTICS
+// ───────────────────────────────────────────────────────────
+
+const SEED_PATIENTS = [
+  {
+    id: 'p_001',
+    name: 'Maria Delgado',
+    age: 67,
+    language: 'es',
+    arrivedAt: Date.now() - 1000 * 60 * 42,
+    symptoms: 'Tightness in chest for the past hour, sweating, left arm tingling.',
+    vitals: { hr: 112, bp: '158/96', spo2: 94, temp: 98.7 },
+    urgency: 5,
+    summary: 'Possible acute coronary syndrome. Classic angina presentation with autonomic signs. Recommend immediate ECG + troponin.',
+    status: 'in_triage',
+    flags: ['cardiac', 'priority'],
+  },
+  {
+    id: 'p_002',
+    name: 'James Okafor',
+    age: 8,
+    language: 'en',
+    arrivedAt: Date.now() - 1000 * 60 * 28,
+    symptoms: 'Fever of 103.2 for two days, lethargic, declined dinner, stiff neck per parent.',
+    vitals: { hr: 132, bp: '94/58', spo2: 98, temp: 103.2 },
+    urgency: 4,
+    summary: 'Pediatric fever with possible meningismus. Rule out CNS infection. Expedite to pediatric bay.',
+    status: 'waiting',
+    flags: ['pediatric', 'fever'],
+  },
+  {
+    id: 'p_003',
+    name: 'Robert Chen',
+    age: 54,
+    language: 'en',
+    arrivedAt: Date.now() - 1000 * 60 * 71,
+    symptoms: 'Fell from ladder ~6ft, hit head on driveway, brief LOC, now nauseated.',
+    vitals: { hr: 88, bp: '142/90', spo2: 97, temp: 98.4 },
+    urgency: 4,
+    summary: 'Head trauma with reported loss of consciousness. CT head indicated. Monitor neuro status.',
+    status: 'waiting',
+    flags: ['trauma', 'head-injury'],
+  },
+  {
+    id: 'p_004',
+    name: 'Aisha Rahman',
+    age: 31,
+    language: 'en',
+    arrivedAt: Date.now() - 1000 * 60 * 95,
+    symptoms: 'Deep laceration to left forearm from kitchen knife, bleeding controlled with towel.',
+    vitals: { hr: 92, bp: '124/78', spo2: 99, temp: 98.6 },
+    urgency: 3,
+    summary: 'Laceration, distal neurovascular intact per intake. Likely needs irrigation and sutures.',
+    status: 'waiting',
+    flags: ['laceration'],
+  },
+  {
+    id: 'p_005',
+    name: 'Theodore Park',
+    age: 22,
+    language: 'en',
+    arrivedAt: Date.now() - 1000 * 60 * 118,
+    symptoms: 'Sprained ankle playing soccer, swelling, can bear partial weight.',
+    vitals: { hr: 78, bp: '118/72', spo2: 99, temp: 98.2 },
+    urgency: 2,
+    summary: 'Likely lateral ankle sprain. X-ray per Ottawa rules. RICE and re-eval.',
+    status: 'waiting',
+    flags: ['ortho'],
+  },
+];
+
+const SEED_MESSAGES = {
+  p_001: [
+    { from: 'doctor', text: 'Maria, we are pulling you into Bay 2 now. Please follow Nurse Carla.', t: Date.now() - 1000 * 60 * 38 },
+    { from: 'patient', text: 'Gracias. La presión todavía está en el pecho.', t: Date.now() - 1000 * 60 * 37 },
+  ],
+  p_002: [],
+  p_003: [
+    { from: 'doctor', text: 'Robert, please stay seated. If your headache worsens, raise your hand.', t: Date.now() - 1000 * 60 * 20 },
+  ],
+  p_004: [],
+  p_005: [],
+};
+
+// rough urgency heuristic for demo — keyword based, deterministic
+function analyzeSymptoms(text) {
+  const t = (text || '').toLowerCase();
+  const has = (...ws) => ws.some(w => t.includes(w));
+
+  if (has('chest pain', 'cant breathe', "can't breathe", 'crushing', 'left arm'))
+    return {
+      urgency: 5,
+      summary: 'Possible cardiac event. Symptoms suggest acute coronary syndrome — immediate ECG and troponin recommended.',
+      flags: ['cardiac', 'priority'],
+    };
+  if (has('stroke', 'face droop', 'slurred', 'one side'))
+    return {
+      urgency: 5,
+      summary: 'Stroke alert pattern. Activate stroke protocol — last known well time needed urgently.',
+      flags: ['neuro', 'priority'],
+    };
+  if (has('hit my head', 'fell', 'unconscious', 'loss of consciousness'))
+    return {
+      urgency: 4,
+      summary: 'Head trauma. Rule out intracranial injury — CT head likely indicated.',
+      flags: ['trauma', 'head-injury'],
+    };
+  if (has('fever', 'temperature') && has('child', 'son', 'daughter', 'baby'))
+    return {
+      urgency: 4,
+      summary: 'Pediatric fever. Assess for source and red flags — expedite to peds bay.',
+      flags: ['pediatric', 'fever'],
+    };
+  if (has('cut', 'bleeding', 'laceration', 'gash'))
+    return {
+      urgency: 3,
+      summary: 'Laceration. Assess depth, bleeding control, and neurovascular status. Likely needs closure.',
+      flags: ['laceration'],
+    };
+  if (has('broke', 'broken', 'fracture'))
+    return {
+      urgency: 3,
+      summary: 'Possible fracture. X-ray indicated, splint and analgesia.',
+      flags: ['ortho'],
+    };
+  if (has('pregnant'))
+    return {
+      urgency: 4,
+      summary: 'Pregnancy-related complaint. Route to OB triage protocol.',
+      flags: ['obstetric'],
+    };
+  return {
+    urgency: 2,
+    summary: 'General complaint. Standard intake — full vitals and clinician review.',
+    flags: ['general'],
+  };
+}
+
+const URGENCY_LABEL = {
+  5: 'Immediate',
+  4: 'Urgent',
+  3: 'Less urgent',
+  2: 'Non-urgent',
+  1: 'Routine',
+};
+
+// ───────────────────────────────────────────────────────────
+//  STYLES — embedded so the artifact is fully self-contained
+// ───────────────────────────────────────────────────────────
+
+const STYLES = `
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=Newsreader:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+* { box-sizing: border-box; }
+
+.tri-app {
+  min-height: 100vh;
+  width: 100%;
+  position: relative;
+  font-feature-settings: "ss01", "ss02";
+}
+
+/* ── view toggle ── */
+.tri-toggle {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  background: rgba(15,15,18,0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 100px;
+  padding: 5px;
+  box-shadow: 0 20px 60px -10px rgba(0,0,0,0.4);
+}
+.tri-toggle button {
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.55);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 9px 18px;
+  border-radius: 100px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.tri-toggle button.active {
+  background: #E8B400;
+  color: #0A0B0D;
+  font-weight: 600;
+}
+.tri-toggle .label {
+  position: absolute;
+  top: -22px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: rgba(255,255,255,0.4);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* ══════════════════════════════════════════════════
+   PATIENT VIEW
+   ══════════════════════════════════════════════════ */
+.pv {
+  min-height: 100vh;
+  background: #F4EFE6;
+  color: #1F2522;
+  font-family: 'Newsreader', Georgia, serif;
+  padding: 48px 32px 120px;
+}
+.pv-wrap {
+  max-width: 720px;
+  margin: 0 auto;
+}
+.pv-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 64px;
+}
+.pv-logo {
+  font-family: 'Fraunces', serif;
+  font-weight: 500;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pv-logo-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #1F3A2E;
+  animation: pulse 2.4s infinite;
+}
+.pv-lang {
+  display: flex;
+  gap: 4px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.pv-lang button {
+  background: none;
+  border: none;
+  color: rgba(31,37,34,0.4);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+}
+.pv-lang button.active {
+  color: #1F2522;
+  background: rgba(31,58,46,0.08);
+}
+
+/* hero (pre-intake) */
+.pv-eyebrow {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #1F3A2E;
+  margin-bottom: 28px;
+}
+.pv-headline {
+  font-family: 'Fraunces', serif;
+  font-weight: 400;
+  font-size: clamp(40px, 6.5vw, 76px);
+  line-height: 1.02;
+  letter-spacing: -0.025em;
+  color: #1F2522;
+  margin: 0 0 32px;
+}
+.pv-headline em {
+  font-style: italic;
+  font-weight: 300;
+  color: #1F3A2E;
+}
+.pv-sub {
+  font-size: 19px;
+  line-height: 1.5;
+  color: rgba(31,37,34,0.7);
+  max-width: 520px;
+  margin: 0 0 56px;
+}
+.pv-cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+.pv-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  background: #1F3A2E;
+  color: #F4EFE6;
+  border: none;
+  font-family: 'Newsreader', serif;
+  font-size: 18px;
+  padding: 18px 28px;
+  border-radius: 100px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+.pv-cta:hover { background: #142A21; transform: translateY(-1px); }
+.pv-cta-mic {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #C84A36;
+  display: grid;
+  place-items: center;
+  color: #F4EFE6;
+}
+.pv-cta-text {
+  background: none;
+  color: #1F3A2E;
+  border: none;
+  font-family: 'Newsreader', serif;
+  font-size: 16px;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  cursor: pointer;
+  padding: 12px 16px;
+}
+
+/* recording state */
+.pv-recording {
+  background: #FFFBF3;
+  border: 1px solid rgba(31,58,46,0.12);
+  border-radius: 24px;
+  padding: 48px;
+  margin-top: 16px;
+  position: relative;
+  overflow: hidden;
+}
+.pv-rec-orb {
+  width: 84px;
+  height: 84px;
+  margin: 0 auto 28px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #E66B55, #C84A36 60%, #8E2E1F);
+  position: relative;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  box-shadow: 0 0 0 0 rgba(200,74,54,0.5);
+  animation: orbpulse 1.6s infinite;
+}
+@keyframes orbpulse {
+  0% { box-shadow: 0 0 0 0 rgba(200,74,54,0.5); }
+  70% { box-shadow: 0 0 0 28px rgba(200,74,54,0); }
+  100% { box-shadow: 0 0 0 0 rgba(200,74,54,0); }
+}
+.pv-rec-status {
+  text-align: center;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #C84A36;
+  margin-bottom: 8px;
+}
+.pv-rec-prompt {
+  text-align: center;
+  font-family: 'Fraunces', serif;
+  font-size: 28px;
+  font-weight: 400;
+  letter-spacing: -0.015em;
+  margin: 0 auto 32px;
+  max-width: 480px;
+  line-height: 1.25;
+}
+.pv-textarea {
+  width: 100%;
+  background: rgba(31,58,46,0.04);
+  border: 1px solid rgba(31,58,46,0.12);
+  border-radius: 14px;
+  padding: 18px 20px;
+  font-family: 'Newsreader', serif;
+  font-size: 17px;
+  line-height: 1.5;
+  color: #1F2522;
+  resize: vertical;
+  min-height: 120px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.pv-textarea:focus { border-color: #1F3A2E; }
+.pv-rec-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 20px;
+  gap: 12px;
+}
+.pv-rec-cancel {
+  background: none;
+  border: none;
+  color: rgba(31,37,34,0.6);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 8px 12px;
+}
+.pv-rec-submit {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: #1F3A2E;
+  color: #F4EFE6;
+  border: none;
+  font-family: 'Newsreader', serif;
+  font-size: 16px;
+  padding: 13px 22px;
+  border-radius: 100px;
+  cursor: pointer;
+}
+.pv-rec-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* status card (after submit) */
+.pv-status-eyebrow {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #1F3A2E;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pv-status-eyebrow .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4A8B3F;
+  animation: pulse 1.8s infinite;
+}
+.pv-status-h {
+  font-family: 'Fraunces', serif;
+  font-size: clamp(34px, 5vw, 56px);
+  font-weight: 400;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  margin: 0 0 32px;
+}
+.pv-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1px;
+  background: rgba(31,58,46,0.12);
+  border: 1px solid rgba(31,58,46,0.12);
+  border-radius: 16px;
+  overflow: hidden;
+  margin-bottom: 36px;
+}
+.pv-stat {
+  background: #F4EFE6;
+  padding: 22px 22px 24px;
+}
+.pv-stat-l {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(31,37,34,0.55);
+  margin-bottom: 10px;
+}
+.pv-stat-v {
+  font-family: 'Fraunces', serif;
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  color: #1F2522;
+}
+.pv-stat-v small {
+  font-size: 14px;
+  color: rgba(31,37,34,0.5);
+  margin-left: 4px;
+}
+
+/* clinician summary card */
+.pv-summary {
+  background: #FFFBF3;
+  border: 1px solid rgba(31,58,46,0.12);
+  border-radius: 16px;
+  padding: 24px 26px;
+  margin-bottom: 28px;
+}
+.pv-summary-l {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #1F3A2E;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pv-summary-t {
+  font-family: 'Newsreader', serif;
+  font-size: 17px;
+  line-height: 1.55;
+  font-style: italic;
+  color: rgba(31,37,34,0.85);
+}
+
+/* message thread */
+.pv-thread {
+  background: #FFFBF3;
+  border: 1px solid rgba(31,58,46,0.12);
+  border-radius: 16px;
+  padding: 22px 24px;
+}
+.pv-thread-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.pv-thread-title {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #1F3A2E;
+}
+.pv-thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.pv-thread-list:empty::before {
+  content: 'No messages yet. Care team will reach out as needed.';
+  font-style: italic;
+  color: rgba(31,37,34,0.45);
+  font-size: 15px;
+}
+.pv-msg {
+  padding: 12px 16px;
+  border-radius: 14px;
+  font-size: 15px;
+  line-height: 1.45;
+  max-width: 86%;
+}
+.pv-msg.doctor {
+  background: rgba(31,58,46,0.08);
+  color: #1F2522;
+  align-self: flex-start;
+  border-bottom-left-radius: 4px;
+}
+.pv-msg.patient {
+  background: #1F3A2E;
+  color: #F4EFE6;
+  align-self: flex-end;
+  border-bottom-right-radius: 4px;
+}
+.pv-msg-meta {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  opacity: 0.55;
+  margin-bottom: 4px;
+}
+.pv-compose {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+.pv-compose input {
+  flex: 1;
+  background: rgba(31,58,46,0.05);
+  border: 1px solid rgba(31,58,46,0.12);
+  border-radius: 100px;
+  padding: 12px 18px;
+  font-family: 'Newsreader', serif;
+  font-size: 15px;
+  outline: none;
+  color: #1F2522;
+}
+.pv-compose input:focus { border-color: #1F3A2E; }
+.pv-compose button {
+  background: #1F3A2E;
+  color: #F4EFE6;
+  border: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* ══════════════════════════════════════════════════
+   DOCTOR VIEW
+   ══════════════════════════════════════════════════ */
+.dv {
+  min-height: 100vh;
+  background: #0A0B0D;
+  color: #E8E6E0;
+  font-family: 'IBM Plex Sans', sans-serif;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+.dv::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(232,180,0,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(232,180,0,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: 0;
+}
+.dv-inner { position: relative; z-index: 1; }
+
+/* header */
+.dv-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 32px;
+  border-bottom: 1px solid rgba(232,180,0,0.15);
+  background: rgba(10,11,13,0.7);
+  backdrop-filter: blur(8px);
+}
+.dv-h-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.dv-h-logo {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 0.25em;
+  color: #E8B400;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dv-h-logo .live {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #E8B400;
+  box-shadow: 0 0 8px #E8B400;
+  animation: pulse 1.6s infinite;
+}
+.dv-h-clock {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  color: rgba(232,230,224,0.55);
+  letter-spacing: 0.1em;
+}
+.dv-stats {
+  display: flex;
+  gap: 36px;
+}
+.dv-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dv-stat-l {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: rgba(232,230,224,0.45);
+  text-transform: uppercase;
+}
+.dv-stat-v {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 19px;
+  font-weight: 500;
+  color: #E8E6E0;
+  letter-spacing: -0.01em;
+}
+.dv-stat-v.alert { color: #FF6B5B; }
+.dv-stat-v.ok    { color: #4ED8C9; }
+
+/* main grid */
+.dv-main {
+  display: grid;
+  grid-template-columns: 420px 1fr;
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+}
+@media (max-width: 1000px) {
+  .dv-main { grid-template-columns: 1fr; }
+}
+
+/* queue */
+.dv-queue {
+  border-right: 1px solid rgba(232,180,0,0.15);
+  overflow-y: auto;
+  max-height: calc(100vh - 73px);
+}
+.dv-queue-h {
+  padding: 16px 22px 12px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(232,230,224,0.45);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  background: #0A0B0D;
+  z-index: 2;
+  border-bottom: 1px solid rgba(232,180,0,0.08);
+}
+.dv-q-item {
+  display: grid;
+  grid-template-columns: 38px 1fr auto;
+  gap: 14px;
+  padding: 16px 22px;
+  border-bottom: 1px solid rgba(232,230,224,0.05);
+  cursor: pointer;
+  transition: background 0.15s;
+  align-items: center;
+  position: relative;
+}
+.dv-q-item:hover { background: rgba(232,180,0,0.04); }
+.dv-q-item.selected {
+  background: rgba(232,180,0,0.08);
+  border-left: 2px solid #E8B400;
+  padding-left: 20px;
+}
+.dv-q-item.new::after {
+  content: 'NEW';
+  position: absolute;
+  top: 16px;
+  right: 22px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  color: #0A0B0D;
+  background: #4ED8C9;
+  padding: 2px 6px;
+  border-radius: 3px;
+  animation: pulse 1.4s infinite;
+}
+.dv-q-urgency {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 18px;
+  font-weight: 600;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  letter-spacing: -0.02em;
+}
+.dv-u-5 { background: #FF4D4D; color: #fff; }
+.dv-u-4 { background: #FF8E2D; color: #0A0B0D; }
+.dv-u-3 { background: #E8B400; color: #0A0B0D; }
+.dv-u-2 { background: #4ED8C9; color: #0A0B0D; }
+.dv-u-1 { background: rgba(232,230,224,0.2); color: #E8E6E0; }
+.dv-q-mid { min-width: 0; }
+.dv-q-name {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  color: #E8E6E0;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dv-q-meta {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: rgba(232,230,224,0.5);
+}
+.dv-q-time {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: rgba(232,230,224,0.55);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* detail panel */
+.dv-detail {
+  padding: 28px 36px 60px;
+  overflow-y: auto;
+  max-height: calc(100vh - 73px);
+}
+.dv-d-empty {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: rgba(232,230,224,0.3);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+.dv-d-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+.dv-d-id {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: rgba(232,230,224,0.4);
+  letter-spacing: 0.15em;
+  margin-bottom: 8px;
+}
+.dv-d-name {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 32px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+  color: #E8E6E0;
+}
+.dv-d-line {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: rgba(232,230,224,0.55);
+  letter-spacing: 0.08em;
+  margin-bottom: 24px;
+}
+.dv-d-line span { color: #E8B400; }
+.dv-d-flags { display: flex; gap: 6px; margin-bottom: 28px; flex-wrap: wrap; }
+.dv-flag {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  background: rgba(232,180,0,0.1);
+  color: #E8B400;
+  padding: 4px 9px;
+  border-radius: 3px;
+  border: 1px solid rgba(232,180,0,0.25);
+}
+.dv-flag.priority { background: rgba(255,77,77,0.15); color: #FF6B5B; border-color: rgba(255,77,77,0.4); }
+
+/* vitals row */
+.dv-vitals {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: rgba(232,180,0,0.12);
+  border: 1px solid rgba(232,180,0,0.12);
+  margin-bottom: 24px;
+}
+.dv-v {
+  background: #0A0B0D;
+  padding: 16px 18px;
+}
+.dv-v-l {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: rgba(232,230,224,0.5);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.dv-v-v {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 22px;
+  font-weight: 500;
+  color: #E8E6E0;
+  letter-spacing: -0.02em;
+}
+.dv-v-v small { font-size: 11px; color: rgba(232,230,224,0.4); margin-left: 3px; }
+
+/* section blocks */
+.dv-block {
+  border: 1px solid rgba(232,230,224,0.08);
+  border-radius: 4px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+  background: rgba(232,230,224,0.02);
+}
+.dv-block-l {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(232,230,224,0.5);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.dv-block-l .ai-badge {
+  background: #4ED8C9;
+  color: #0A0B0D;
+  font-size: 8px;
+  padding: 2px 5px;
+  border-radius: 2px;
+  letter-spacing: 0.15em;
+}
+.dv-block-text {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: #E8E6E0;
+}
+.dv-block-text.symptoms { font-style: italic; color: rgba(232,230,224,0.85); }
+
+/* messages */
+.dv-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.dv-msg {
+  padding: 10px 14px;
+  border-radius: 4px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  max-width: 80%;
+  font-family: 'IBM Plex Sans', sans-serif;
+}
+.dv-msg.doctor {
+  background: rgba(232,180,0,0.1);
+  color: #E8E6E0;
+  align-self: flex-end;
+  border: 1px solid rgba(232,180,0,0.2);
+}
+.dv-msg.patient {
+  background: rgba(232,230,224,0.06);
+  color: #E8E6E0;
+  align-self: flex-start;
+  border: 1px solid rgba(232,230,224,0.1);
+}
+.dv-msg-meta {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  opacity: 0.5;
+  margin-bottom: 3px;
+}
+.dv-compose {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.dv-compose input {
+  flex: 1;
+  background: rgba(232,230,224,0.04);
+  border: 1px solid rgba(232,230,224,0.12);
+  border-radius: 4px;
+  padding: 10px 14px;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 14px;
+  color: #E8E6E0;
+  outline: none;
+}
+.dv-compose input:focus { border-color: #E8B400; }
+.dv-compose button {
+  background: #E8B400;
+  color: #0A0B0D;
+  border: none;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding: 0 18px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* actions */
+.dv-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+.dv-action {
+  background: rgba(232,230,224,0.05);
+  color: #E8E6E0;
+  border: 1px solid rgba(232,230,224,0.12);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 9px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s;
+}
+.dv-action:hover { background: rgba(232,180,0,0.1); border-color: rgba(232,180,0,0.3); color: #E8B400; }
+.dv-action.primary { background: #E8B400; color: #0A0B0D; border-color: #E8B400; }
+.dv-action.primary:hover { background: #FFC820; color: #0A0B0D; }
+.dv-action.danger { color: #FF6B5B; border-color: rgba(255,107,91,0.3); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.25); border-radius: 100px; }
+.pv ::-webkit-scrollbar-thumb { background: rgba(31,58,46,0.18); }
+`;
+
+// ───────────────────────────────────────────────────────────
+//  HELPERS
+// ───────────────────────────────────────────────────────────
+
+function fmtAgo(ts) {
+  const mins = Math.floor((Date.now() - ts) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+}
+function fmtTime(ts) {
+  return new Date(ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+function fmtClock(d) {
+  return d.toLocaleTimeString('en-US', { hour12: false });
+}
+
+// estimated wait based on urgency + queue position
+function estimateWait(patient, allPatients) {
+  if (patient.urgency >= 5) return 0;
+  if (patient.urgency === 4) return 8;
+  const aheadOfMe = allPatients
+    .filter(p => p.id !== patient.id && p.urgency >= patient.urgency)
+    .length;
+  return Math.max(5, aheadOfMe * 14 + (5 - patient.urgency) * 10);
+}
+
+// ───────────────────────────────────────────────────────────
+//  PATIENT VIEW
+// ───────────────────────────────────────────────────────────
+
+function PatientView({
+  patients, currentId, setCurrentId, addPatient,
+  messages, sendMessage, lang, setLang
+}) {
+  const [stage, setStage] = useState('idle'); // idle | recording | reviewing | submitted
+  const [draft, setDraft] = useState('');
+  const [name, setName] = useState('');
+  const [chatDraft, setChatDraft] = useState('');
+  const threadRef = useRef(null);
+
+  const me = patients.find(p => p.id === currentId);
+
+  useEffect(() => {
+    if (me && threadRef.current) {
+      threadRef.current.scrollTop = threadRef.current.scrollHeight;
+    }
+  }, [messages, me]);
+
+  // simulated voice intake — after 2.4s we drop into review with a sample
+  const startRecording = () => {
+    setStage('recording');
+    setTimeout(() => {
+      setDraft('');
+      setStage('reviewing');
+    }, 2400);
+  };
+
+  const submitIntake = () => {
+    if (!draft.trim()) return;
+    const newId = addPatient({
+      name: name.trim() || 'You',
+      symptoms: draft.trim(),
+    });
+    setCurrentId(newId);
+    setStage('submitted');
+  };
+
+  const t = lang === 'es' ? {
+    title1: 'Cuéntenos qué le ', title2: 'pasa.',
+    sub: 'Hable o escriba. Lo llevaremos al cuidado adecuado, más rápido. Nuestro equipo escuchará en su idioma.',
+    voice: 'Empezar admisión por voz',
+    text: 'Prefiero escribir',
+    listening: 'Escuchando',
+    prompt: '¿Qué le trajo hoy?',
+    placeholder: 'Describa sus síntomas con sus propias palabras…',
+    nameLabel: 'Su nombre',
+    submit: 'Enviar admisión',
+    cancel: 'Cancelar',
+    waiting: 'Está en la cola',
+    pos: 'Posición',
+    wait: 'Tiempo estimado',
+    urgency: 'Nivel de prioridad',
+    status: 'Estado',
+    summary: 'Resumen clínico',
+    messages: 'Mensajes con su equipo',
+    typeMsg: 'Escribir un mensaje…',
+    of: 'de',
+  } : {
+    title1: 'Tell us what\u2019s ', title2: 'wrong.',
+    sub: 'Talk or type. We\u2019ll get you to the right care, faster. Our team listens in your language.',
+    voice: 'Start voice intake',
+    text: 'I\u2019d rather type',
+    listening: 'Listening',
+    prompt: 'What brought you in today?',
+    placeholder: 'Describe your symptoms in your own words…',
+    nameLabel: 'Your name',
+    submit: 'Submit intake',
+    cancel: 'Cancel',
+    waiting: 'You\u2019re in the queue',
+    pos: 'Position',
+    wait: 'Estimated wait',
+    urgency: 'Priority level',
+    status: 'Status',
+    summary: 'Clinical summary',
+    messages: 'Messages with your care team',
+    typeMsg: 'Type a message…',
+    of: 'of',
+  };
+
+  return (
+    <div className="pv">
+      <div className="pv-wrap">
+        <div className="pv-topbar">
+          <div className="pv-logo">
+            <span className="pv-logo-dot" />
+            MERIDIAN ER · Houston
+          </div>
+          <div className="pv-lang">
+            <button className={lang === 'en' ? 'active' : ''} onClick={() => setLang('en')}>EN</button>
+            <button className={lang === 'es' ? 'active' : ''} onClick={() => setLang('es')}>ES</button>
+          </div>
+        </div>
+
+        {stage === 'idle' && !me && (
+          <>
+            <div className="pv-eyebrow">Welcome · Bay open</div>
+            <h1 className="pv-headline">
+              {t.title1}<em>{t.title2}</em>
+            </h1>
+            <p className="pv-sub">{t.sub}</p>
+            <div className="pv-cta-row">
+              <button className="pv-cta" onClick={startRecording}>
+                <span className="pv-cta-mic"><Mic size={18} /></span>
+                {t.voice}
+              </button>
+              <button className="pv-cta-text" onClick={() => { setStage('reviewing'); setDraft(''); }}>
+                {t.text} →
+              </button>
+            </div>
+          </>
+        )}
+
+        {stage === 'recording' && (
+          <div className="pv-recording">
+            <div className="pv-rec-orb"><Mic size={32} /></div>
+            <div className="pv-rec-status">● {t.listening}</div>
+            <div className="pv-rec-prompt">"{t.prompt}"</div>
+          </div>
+        )}
+
+        {stage === 'reviewing' && (
+          <div className="pv-recording">
+            <div className="pv-rec-status" style={{ color: '#1F3A2E' }}>○ Review &amp; submit</div>
+            <div className="pv-rec-prompt">{lang === 'es' ? 'Revise lo que vamos a enviar' : 'Review what we\u2019ll send'}</div>
+            <div style={{ marginBottom: 16 }}>
+              <div className="pv-stat-l" style={{ marginBottom: 8 }}>{t.nameLabel}</div>
+              <input
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="e.g. Alex Rivera"
+                style={{
+                  width: '100%', padding: '12px 16px', borderRadius: 10,
+                  border: '1px solid rgba(31,58,46,0.18)', background: 'rgba(31,58,46,0.04)',
+                  fontFamily: 'Newsreader, serif', fontSize: 16, color: '#1F2522', outline: 'none'
+                }}
+              />
+            </div>
+            <textarea
+              className="pv-textarea"
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              placeholder={t.placeholder}
+              autoFocus
+            />
+            <div className="pv-rec-actions">
+              <button className="pv-rec-cancel" onClick={() => { setStage('idle'); setDraft(''); }}>
+                <X size={11} style={{ display: 'inline', marginRight: 4 }} />{t.cancel}
+              </button>
+              <button className="pv-rec-submit" disabled={!draft.trim()} onClick={submitIntake}>
+                {t.submit} <ArrowRight size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {stage === 'submitted' && me && (
+          <>
+            <div className="pv-status-eyebrow"><span className="dot" /> {t.waiting}</div>
+            <h1 className="pv-status-h">
+              {lang === 'es' ? 'Hola, ' : 'Hi, '}<em style={{ fontStyle: 'italic', fontWeight: 300 }}>{me.name}</em>.
+              <br/>{lang === 'es' ? 'Estamos pendientes.' : 'We\u2019ve got you.'}
+            </h1>
+
+            <div className="pv-status-grid">
+              <div className="pv-stat">
+                <div className="pv-stat-l">{t.pos}</div>
+                <div className="pv-stat-v">
+                  {patients
+                    .slice()
+                    .sort((a, b) => b.urgency - a.urgency || a.arrivedAt - b.arrivedAt)
+                    .findIndex(p => p.id === me.id) + 1}
+                  <small>{t.of} {patients.length}</small>
+                </div>
+              </div>
+              <div className="pv-stat">
+                <div className="pv-stat-l">{t.wait}</div>
+                <div className="pv-stat-v">{estimateWait(me, patients)}<small>min</small></div>
+              </div>
+              <div className="pv-stat">
+                <div className="pv-stat-l">{t.urgency}</div>
+                <div className="pv-stat-v" style={{ fontSize: 22 }}>
+                  {URGENCY_LABEL[me.urgency]}
+                </div>
+              </div>
+              <div className="pv-stat">
+                <div className="pv-stat-l">{t.status}</div>
+                <div className="pv-stat-v" style={{ fontSize: 22, textTransform: 'capitalize' }}>
+                  {me.status.replace('_', ' ')}
+                </div>
+              </div>
+            </div>
+
+            <div className="pv-summary">
+              <div className="pv-summary-l">
+                <Sparkles size={12} /> {t.summary}
+              </div>
+              <div className="pv-summary-t">"{me.summary}"</div>
+            </div>
+
+            <div className="pv-thread">
+              <div className="pv-thread-h">
+                <div className="pv-thread-title"><MessageSquare size={11} style={{ display: 'inline', marginRight: 6 }}/>{t.messages}</div>
+              </div>
+              <div className="pv-thread-list" ref={threadRef}>
+                {(messages[me.id] || []).map((m, i) => (
+                  <div key={i} className={`pv-msg ${m.from}`}>
+                    <div className="pv-msg-meta">{m.from === 'doctor' ? 'Care team' : 'You'} · {fmtTime(m.t)}</div>
+                    {m.text}
+                  </div>
+                ))}
+              </div>
+              <div className="pv-compose">
+                <input
+                  value={chatDraft}
+                  onChange={e => setChatDraft(e.target.value)}
+                  placeholder={t.typeMsg}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && chatDraft.trim()) {
+                      sendMessage(me.id, 'patient', chatDraft.trim());
+                      setChatDraft('');
+                    }
+                  }}
+                />
+                <button onClick={() => {
+                  if (chatDraft.trim()) {
+                    sendMessage(me.id, 'patient', chatDraft.trim());
+                    setChatDraft('');
+                  }
+                }}>
+                  <Send size={16} />
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────
+//  DOCTOR VIEW
+// ───────────────────────────────────────────────────────────
+
+function DoctorView({
+  patients, selectedId, setSelectedId,
+  messages, sendMessage, updateStatus, newPatientIds
+}) {
+  const [now, setNow] = useState(new Date());
+  const [chatDraft, setChatDraft] = useState('');
+  const threadRef = useRef(null);
+
+  useEffect(() => {
+    const tick = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+
+  const selected = patients.find(p => p.id === selectedId);
+  const sorted = patients.slice().sort(
+    (a, b) => b.urgency - a.urgency || a.arrivedAt - b.arrivedAt
+  );
+  const critical = patients.filter(p => p.urgency >= 4).length;
+  const avgWait = Math.round(
+    patients.reduce((s, p) => s + (Date.now() - p.arrivedAt) / 60000, 0) / Math.max(patients.length, 1)
+  );
+
+  useEffect(() => {
+    if (selected && threadRef.current) {
+      threadRef.current.scrollTop = threadRef.current.scrollHeight;
+    }
+  }, [messages, selected]);
+
+  return (
+    <div className="dv">
+      <div className="dv-inner">
+        <div className="dv-header">
+          <div className="dv-h-left">
+            <div className="dv-h-logo"><span className="live" />MERIDIAN · TRIAGE OPS</div>
+            <div className="dv-h-clock">{fmtClock(now)} CST</div>
+          </div>
+          <div className="dv-stats">
+            <div className="dv-stat">
+              <div className="dv-stat-l">In queue</div>
+              <div className="dv-stat-v">{patients.length}</div>
+            </div>
+            <div className="dv-stat">
+              <div className="dv-stat-l">Critical (≥4)</div>
+              <div className={`dv-stat-v ${critical > 0 ? 'alert' : 'ok'}`}>{critical}</div>
+            </div>
+            <div className="dv-stat">
+              <div className="dv-stat-l">Avg dwell</div>
+              <div className="dv-stat-v">{avgWait}m</div>
+            </div>
+            <div className="dv-stat">
+              <div className="dv-stat-l">Next-hour load</div>
+              <div className="dv-stat-v ok">+9</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="dv-main">
+          <div className="dv-queue">
+            <div className="dv-queue-h">
+              <span>Queue · sorted by ESI</span>
+              <span style={{ color: '#E8B400' }}>{sorted.length}</span>
+            </div>
+            {sorted.map(p => (
+              <div
+                key={p.id}
+                className={`dv-q-item ${selectedId === p.id ? 'selected' : ''} ${newPatientIds.includes(p.id) ? 'new' : ''}`}
+                onClick={() => setSelectedId(p.id)}
+              >
+                <div className={`dv-q-urgency dv-u-${p.urgency}`}>{p.urgency}</div>
+                <div className="dv-q-mid">
+                  <div className="dv-q-name">{p.name}</div>
+                  <div className="dv-q-meta">{p.age}y · {p.flags[0] || 'general'} · {p.status.replace('_', ' ')}</div>
+                </div>
+                <div className="dv-q-time">{fmtAgo(p.arrivedAt)}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="dv-detail">
+            {!selected && (
+              <div className="dv-d-empty">— Select a patient from queue —</div>
+            )}
+            {selected && (
+              <>
+                <div className="dv-d-top">
+                  <div>
+                    <div className="dv-d-id">PT_ID {selected.id.toUpperCase()}</div>
+                    <h2 className="dv-d-name">{selected.name}</h2>
+                    <div className="dv-d-line">
+                      {selected.age}y · LANG <span>{selected.language.toUpperCase()}</span> ·
+                      ARRIVED {fmtTime(selected.arrivedAt)} · ESI <span>{selected.urgency}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="dv-d-flags">
+                  {selected.flags.map(f => (
+                    <span key={f} className={`dv-flag ${f === 'priority' ? 'priority' : ''}`}>{f}</span>
+                  ))}
+                </div>
+
+                <div className="dv-vitals">
+                  <div className="dv-v"><div className="dv-v-l">Heart rate</div><div className="dv-v-v">{selected.vitals.hr}<small>bpm</small></div></div>
+                  <div className="dv-v"><div className="dv-v-l">Blood pressure</div><div className="dv-v-v" style={{fontSize: 18}}>{selected.vitals.bp}</div></div>
+                  <div className="dv-v"><div className="dv-v-l">SpO₂</div><div className="dv-v-v">{selected.vitals.spo2}<small>%</small></div></div>
+                  <div className="dv-v"><div className="dv-v-l">Temp</div><div className="dv-v-v">{selected.vitals.temp}<small>°F</small></div></div>
+                </div>
+
+                <div className="dv-block">
+                  <div className="dv-block-l"><Stethoscope size={12} /> Reported symptoms</div>
+                  <div className="dv-block-text symptoms">"{selected.symptoms}"</div>
+                </div>
+
+                <div className="dv-block">
+                  <div className="dv-block-l"><Sparkles size={12} /> Clinical summary <span className="ai-badge">AI</span></div>
+                  <div className="dv-block-text">{selected.summary}</div>
+                </div>
+
+                <div className="dv-block">
+                  <div className="dv-block-l"><MessageSquare size={12} /> Patient channel</div>
+                  <div className="dv-thread" ref={threadRef}>
+                    {(messages[selected.id] || []).length === 0 && (
+                      <div style={{ color: 'rgba(232,230,224,0.4)', fontStyle: 'italic', fontSize: 13 }}>
+                        No messages yet. Send the first.
+                      </div>
+                    )}
+                    {(messages[selected.id] || []).map((m, i) => (
+                      <div key={i} className={`dv-msg ${m.from}`}>
+                        <div className="dv-msg-meta">{m.from === 'doctor' ? 'You' : selected.name} · {fmtTime(m.t)}</div>
+                        {m.text}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="dv-compose">
+                    <input
+                      value={chatDraft}
+                      onChange={e => setChatDraft(e.target.value)}
+                      placeholder="Send to patient (auto-translates to their language)…"
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && chatDraft.trim()) {
+                          sendMessage(selected.id, 'doctor', chatDraft.trim());
+                          setChatDraft('');
+                        }
+                      }}
+                    />
+                    <button onClick={() => {
+                      if (chatDraft.trim()) {
+                        sendMessage(selected.id, 'doctor', chatDraft.trim());
+                        setChatDraft('');
+                      }
+                    }}>
+                      Send
+                    </button>
+                  </div>
+                </div>
+
+                <div className="dv-actions">
+                  <button
+                    className="dv-action primary"
+                    onClick={() => updateStatus(selected.id, 'in_triage')}
+                  >
+                    <ChevronRight size={12} /> Move to triage
+                  </button>
+                  <button
+                    className="dv-action"
+                    onClick={() => updateStatus(selected.id, 'seen')}
+                  >
+                    <Check size={12} /> Mark seen
+                  </button>
+                  <button
+                    className="dv-action"
+                    onClick={() => sendMessage(selected.id, 'doctor', 'A nurse is on the way to you now. Please stay seated.')}
+                  >
+                    <Radio size={12} /> Ping nurse-bot
+                  </button>
+                  <button className="dv-action danger">
+                    <AlertTriangle size={12} /> Escalate
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────
+//  ROOT
+// ───────────────────────────────────────────────────────────
+
+export default function TriageRoom() {
+  const [patients, setPatients] = useState(SEED_PATIENTS);
+  const [messages, setMessages] = useState(SEED_MESSAGES);
+  const [view, setView] = useState('patient');
+  const [currentPatientId, setCurrentPatientId] = useState(null); // who is "me" on the patient view
+  const [selectedDoctorId, setSelectedDoctorId] = useState('p_001'); // who the doctor is looking at
+  const [newPatientIds, setNewPatientIds] = useState([]);
+  const [lang, setLang] = useState('en');
+
+  const addPatient = ({ name, symptoms }) => {
+    const { urgency, summary, flags } = analyzeSymptoms(symptoms);
+    const id = `p_${Math.random().toString(36).slice(2, 7)}`;
+    const newP = {
+      id,
+      name,
+      age: 34,
+      language: lang,
+      arrivedAt: Date.now(),
+      symptoms,
+      vitals: {
+        hr: 80 + Math.floor(Math.random() * 30),
+        bp: `${118 + Math.floor(Math.random() * 20)}/${72 + Math.floor(Math.random() * 14)}`,
+        spo2: 97 + Math.floor(Math.random() * 3),
+        temp: (97.6 + Math.random() * 1.4).toFixed(1),
+      },
+      urgency,
+      summary,
+      status: 'waiting',
+      flags,
+    };
+    setPatients(prev => [newP, ...prev]);
+    setNewPatientIds(prev => [...prev, id]);
+    setTimeout(() => setNewPatientIds(prev => prev.filter(x => x !== id)), 12000);
+    return id;
+  };
+
+  const sendMessage = (patientId, from, text) => {
+    setMessages(prev => ({
+      ...prev,
+      [patientId]: [...(prev[patientId] || []), { from, text, t: Date.now() }],
+    }));
+  };
+
+  const updateStatus = (patientId, status) => {
+    setPatients(prev => prev.map(p => p.id === patientId ? { ...p, status } : p));
+    if (status === 'in_triage') {
+      sendMessage(patientId, 'doctor', 'Please head to triage now. Follow the green-lit corridor.');
+    } else if (status === 'seen') {
+      sendMessage(patientId, 'doctor', 'A clinician will be with you in Bay 4 shortly.');
+    }
+  };
+
+  return (
+    <div className="tri-app">
+      <style>{STYLES}</style>
+
+      {view === 'patient' ? (
+        <PatientView
+          patients={patients}
+          currentId={currentPatientId}
+          setCurrentId={setCurrentPatientId}
+          addPatient={addPatient}
+          messages={messages}
+          sendMessage={sendMessage}
+          lang={lang}
+          setLang={setLang}
+        />
+      ) : (
+        <DoctorView
+          patients={patients}
+          selectedId={selectedDoctorId}
+          setSelectedId={setSelectedDoctorId}
+          messages={messages}
+          sendMessage={sendMessage}
+          updateStatus={updateStatus}
+          newPatientIds={newPatientIds}
+        />
+      )}
+
+      <div className="tri-toggle">
+        <span className="label">Demo only · toggle UI</span>
+        <button className={view === 'patient' ? 'active' : ''} onClick={() => setView('patient')}>
+          <User size={12} /> Patient
+        </button>
+        <button className={view === 'doctor' ? 'active' : ''} onClick={() => setView('doctor')}>
+          <Stethoscope size={12} /> Doctor
+        </button>
+      </div>
+    </div>
+  );
+}

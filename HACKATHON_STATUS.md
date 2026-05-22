@@ -9,6 +9,7 @@
 ## DONE
 - Project structure scaffolded: `/docs`, `/demo-assets`, `/submission`, `/src` (yours).
 - **Working demo webpage** — `demo-assets/interpreter-demo.html`. Real browser speech-to-text + text-to-speech, live translation API with always-on offline ER phrasebook fallback, emotion/urgency meter that shapes the spoken voice, Mongo patient-record panel, Snowflake language-gap analytics panel. **12 languages** (added Turkish, Russian, Kyrgyz) and a **bidirectional Switch-direction button** (doctor→patient / patient→doctor). Syntax-verified.
+- **Second demo surface** — `demo-assets/triage-room.html` (+ source `triage-room.jsx`, your code). Two coupled views: patient intake + doctor ESI-sorted triage console with live messaging. Babel-verified to compile; packaged as a double-click-runnable page (React + lucide via CDN). Note: voice intake here is *simulated* (timeout), unlike the real Web Speech in interpreter-demo.html.
 - First drafts of all Devpost deliverables (see `/submission` + `/docs`).
 
 ## BLOCKING
